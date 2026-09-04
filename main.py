@@ -18,39 +18,52 @@ app.add_middleware(
 class VideoRequest(BaseModel):
     url: str
 
-async def get_tiktok_video(url: str):
-    async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
-        # استخدام API خارجي مخصص لتيك توك يتجاوز الحظر
-        api_url = f"https://tikwm.com/api/?url={url}"
-        response = await client.get(api_url)
-        data = response.json()
+async def fetch_tiktok_direct(url: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15.0, headers=headers) as client:
+        # فك الرابط المختصر إن وجد
+        resp = await client.get(url)
+        final_url = str(resp.url)
+        
+        # الاستعانة بـ API مخصص لاستخراج فيديوهات تيك توك بدون علامة مائية
+        api_url = f"https://tikwm.com/api/?url={final_url}"
+        api_resp = await client.get(api_url)
+        data = api_resp.json()
+        
         if data.get("code") == 0 and "data" in data:
-            video_data = data["data"]
+            v_data = data["data"]
+            play_url = v_data.get("play")
+            if play_url and not play_url.startswith("http"):
+                play_url = "https://tikwm.com" + play_url
+                
             return {
                 "success": True,
-                "title": video_data.get("title", "TikTok Video"),
-                "thumbnail": video_data.get("cover", ""),
-                "download_url": video_data.get("play", ""),
-                "duration": video_data.get("duration", 0)
+                "title": v_data.get("title") or "TikTok Video",
+                "thumbnail": v_data.get("cover") or "",
+                "download_url": play_url,
+                "url": play_url,
+                "duration": v_data.get("duration", 0)
             }
     return None
 
 @app.post("/api/extract")
 async def extract_video(request: VideoRequest):
-    url = request.url.strip()
+    url = request.url.strip() if request.url else ""
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
 
-    # إذا كان الرابط من تيك توك يتم معالجته بواسطة API المخصص
+    # معالجة روابط تيك توك
     if "tiktok.com" in url:
         try:
-            result = await get_tiktok_video(url)
-            if result:
-                return result
+            res = await fetch_tiktok_direct(url)
+            if res:
+                return res
         except Exception:
             pass
 
-    # للمنصات الأخرى (YouTube, Instagram, X) يتم استخدام yt-dlp
+    # معالجة باقي المنصات عبر yt-dlp
     ydl_opts = {
         'format': 'best',
         'quiet': True,
@@ -62,34 +75,18 @@ async def extract_video(request: VideoRequest):
         loop = asyncio.get_event_loop()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
-            download_url = info.get('url') or (info.get('formats', [{}])[-1].get('url') if info.get('formats') else '')
-            return {
-                "success": True,
-                "title": info.get('title', 'Video'),
-                "thumbnail": info.get('thumbnail', ''),
-                "download_url": download_url,
-                "duration": info.get('duration', 0)
-            }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to extract video: {str(e)}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
-            
-            # Extract highest quality direct video URL
-            download_url = info.get('url') or (info.get('formats', [{}])[-1].get('url') if info.get('formats') else '')
+            d_url = info.get('url') or (info.get('formats', [{}])[-1].get('url') if info.get('formats') else '')
             
             return {
                 "success": True,
                 "title": info.get('title', 'Video'),
                 "thumbnail": info.get('thumbnail', ''),
-                "download_url": download_url,
+                "download_url": d_url,
+                "url": d_url,
                 "duration": info.get('duration', 0)
             }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Extraction failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
